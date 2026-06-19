@@ -1,0 +1,8 @@
+# HallKing backend serving extras — install ON TOP of the main ML stack
+# (torch + transformers 5.x + bitsandbytes + accelerate + scikit-learn, see ../requirements.txt).
+# On Colab:  pip install -r requirements.txt  then  pip install -r backend/requirements_colab.txt
+fastapi
+uvicorn[standard]
+pyngrok
+pysbd
+python-multipart

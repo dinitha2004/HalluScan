@@ -1,0 +1,24 @@
+# HallKing requirements — for a FRESH environment (e.g. Google Colab).
+# LOCALLY we reuse the existing `se_probes_env` (transformers 5.x, torch cu118, bitsandbytes)
+# and `bleurt_env` (TF CPU + transformers 4.x). Do NOT pip install this file into se_probes_env.
+#
+# Core LLM + detectors
+torch>=2.5
+transformers>=4.47
+accelerate>=0.26
+bitsandbytes>=0.43
+scikit-learn>=1.6
+scipy>=1.14
+numpy>=1.26
+pandas>=2.2
+datasets>=3.0
+# Sentence segmentation + claim filtering (SEP per-sentence localization)
+spacy>=3.7
+pysbd>=0.3.4
+# Fusion (gradient-boosting baseline) + plots + report
+lightgbm>=4.0
+matplotlib>=3.8
+python-docx>=1.1
+# Notebook kernel
+ipykernel>=6.29
+# Ground-truth scoring (BLEURT) runs in a SEPARATE env, not here — see hallking/gt_bleurt.py
