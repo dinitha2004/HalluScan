@@ -1,8 +1,10 @@
-# HallKing backend serving extras — install ON TOP of the main ML stack
-# (torch + transformers 5.x + bitsandbytes + accelerate + scikit-learn, see ../requirements.txt).
-# On Colab:  pip install -r requirements.txt  then  pip install -r backend/requirements_colab.txt
+# HallKing Colab serving extras — installed by notebooks/7_backend_colab.ipynb ON TOP of
+# Colab's preinstalled CUDA torch + that notebook's explicit ML line (transformers, accelerate,
+# bitsandbytes, sentencepiece, scikit-learn, pandas, pyarrow).
+# Do NOT `pip install -r requirements.txt` on Colab — it reinstalls torch and breaks CUDA.
 fastapi
 uvicorn[standard]
 pyngrok
 pysbd
-python-multipart
+nest_asyncio
+requests

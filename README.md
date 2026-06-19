@@ -140,7 +140,7 @@ data/ models/  generated feature tables + saved fusion models
    MNLI, ~1 GB, cached) or `bleurtacc` (TruthfulQA's own metric), then recomputes AUROC against the
    detector scores from notebook 5 — no 8B re-generation. CLI: `python tools/truthfulqa_judge.py nli`.
 8. `notebooks/7_backend_colab.ipynb` → **host the web-demo backend on a Colab GPU + ngrok** (single Instruct
-   model). Clone the repo, HF login, start `backend/app.py` + print a public ngrok URL to paste into the UI.
+   model). Clone the repo, HF login, start `backend/app.py` on the fixed ngrok URL (the frontend auto-connects — nothing to paste).
 
 ## Live web demo (chatbot UI with hallucination detection)
 
@@ -178,7 +178,7 @@ Repo: `https://github.com/dinitha2004/HalluScan`.
 **Every session (≈ "Run all and go")**
 4. Open `notebooks/7_backend_colab.ipynb` in Colab with a **T4 GPU** runtime. In the **CONFIG cell** paste your
    **HF token** (Llama-3.1 license accepted) and **ngrok authtoken** — *do not commit the notebook with tokens
-   filled in.* Then **Runtime ▸ Run all**. First run downloads Llama-3.1-8B (~16 GB, a few min). **Keep the tab
+   filled in.* Then **Runtime ▸ Restart session and run all**. First run downloads Llama-3.1-8B (~16 GB, a few min). **Keep the tab
    open** — the tunnel dies when it stops.
 5. Open the Vercel site — it **auto-connects** to the fixed backend URL (the status dot turns green once the model
    is loaded). Nothing to paste; the top-bar field is only a manual override.
