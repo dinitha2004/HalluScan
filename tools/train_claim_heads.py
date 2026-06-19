@@ -53,16 +53,19 @@ def _raw_paths(tag):
 
 # ---------------------------------------------------------------- GPU: generate sentences + cache features
 def build(tag="s1", datasets=("triviaqa",), n=1500, offset=0, max_new_tokens=64,
-          instruct_model=INSTRUCT_MODEL, save=True, verbose=True):
-    """Generate one factual sentence per question (sentence regime), cache RAW per-head features +
-    reference labels, drop refusals. Saves data/claims_sent_<tag>.parquet + _sepfeats.npy."""
+          instruct_model=INSTRUCT_MODEL, label_method="llm_judge", save=True, verbose=True):
+    """Generate one factual sentence per question (sentence regime), cache RAW per-head features + labels,
+    drop refusals. Saves data/claims_sent_<tag>.parquet + _sepfeats.npy.
+
+    label_method: "llm_judge" (default, comparative QA judge — robust) | "reference" (substring, brittle) |
+    "bleurt". The substring path mislabels ~40% of true sentences as hallucinated, so it is no longer default."""
     if isinstance(datasets, str):
         datasets = [datasets]
     dfs, feats = [], []
     for ds in datasets:
         df_i, sf_i = retrain.gen_and_cache(ds, n=n, offset=offset, max_new_tokens=max_new_tokens,
                                            instruct_model=instruct_model, regime="sentence",
-                                           label_method="reference", drop_refusals=True, verbose=verbose)
+                                           label_method=label_method, drop_refusals=True, verbose=verbose)
         df_i["source"] = f"qa:{ds}"
         dfs.append(df_i); feats.append(sf_i)
     df = pd.concat(dfs, ignore_index=True)

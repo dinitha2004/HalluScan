@@ -98,6 +98,74 @@ def label_by_llm_judge(claims, evidences, engine, top_k: int = 4, max_evidence_c
     return np.array(labels, dtype=int), {"verdict": verdicts}
 
 
+_QA_JUDGE_SYS = (
+    "You are a strict but fair trivia fact-checker. You are given a question, the known correct answer(s), "
+    "and a model's answer. Reply CORRECT if the model's answer correctly answers the question — matching the "
+    "known answer, allowing paraphrases, synonyms, abbreviations and extra true detail. Reply INCORRECT only "
+    "if it names a different entity, gives a wrong date/number/name, or contradicts the known answer. "
+    "Reply with exactly one word: CORRECT or INCORRECT.")
+
+_NEG = ("incorrect", "not correct", "not right", "wrong", "false", "does not", "doesn't", "isn't correct",
+        " no ", " no,", " no.", " no\n")
+_POS = ("correct", " yes", "right", "true", "supported", "accurate")
+
+
+def _parse_verdict(resp: str) -> int:
+    """Map a free-text judge reply -> label (0=truthful/correct, 1=hallucinated/incorrect). Robust to the
+    model not obeying 'one word' (e.g. 'The answer is correct.'). NOTE 'incorrect' contains 'correct', so the
+    NEGATIVE markers are tested first. Unparseable -> 1 (conservative: treat as hallucinated)."""
+    r = " " + (resp or "").strip().lower() + " "
+    if any(t in r for t in _NEG):
+        return 1
+    return 0 if any(t in r for t in _POS) else 1
+
+
+def label_by_qa_judge(questions, claims, references, engine, max_new_tokens=8, verbose=True):
+    """Comparative QA-judge factuality labels — the right check for short-answer QA (TriviaQA), where the
+    substring `label_by_reference_match` mislabels true-but-reworded answers (paraphrase / abbreviation /
+    decade-vs-year / incomplete alias lists).
+
+    For each row the model is shown the QUESTION + the gold reference answer(s) + its own answer and asked
+    to reply CORRECT/INCORRECT. `engine` is a loaded HallKingEngine (reuses the 8B in VRAM). truthful (0) iff
+    the verdict parses as correct; otherwise hallucinated (1). references[i] = list of gold strings (empty ->
+    the judge falls back to its own knowledge — less reliable, prefer hybrid). Returns (labels[int], info
+    with the raw verdict strings so the run is inspectable)."""
+    from tqdm.auto import tqdm
+    labels, verdicts = [], []
+    for q, claim, refs in tqdm(list(zip(questions, claims, references)), desc="QA-judge", unit="claim",
+                               disable=not verbose):
+        gold = "; ".join(str(r) for r in (refs or []) if str(r).strip()) or "(no reference available)"
+        prompt = (f"Question: {q}\nKnown correct answer(s): {gold}\nModel's answer: \"{claim}\"\n\n"
+                  "Is the model's answer correct? Reply CORRECT or INCORRECT.")
+        ans = engine.chat(prompt, system=_QA_JUDGE_SYS, max_new_tokens=max_new_tokens).strip()
+        labels.append(_parse_verdict(ans))
+        verdicts.append(ans[:24])
+    return np.array(labels, dtype=int), {"verdict": verdicts}
+
+
+def label_hybrid(questions, claims, references, engine, verbose=True):
+    """HYBRID label = truthful (0) if a gold alias is a substring of the answer (reliable, high-precision),
+    ELSE adjudicate with the QA judge. The judge only ever RESCUES substring-"hallucinated" rows (true answers
+    the substring rule missed); it can never flip a substring match to hallucinated, so it cannot corrupt the
+    clean truthful class (which is where the bare judge made its worst errors). Returns (labels, info) where
+    info['verdict'][i] is 'substring-match' or the judge's raw reply, and info['source'] tags each row."""
+    sub = label_by_reference_match(claims, references)        # 0 = alias substring match, 1 = no match
+    idx = [i for i, s in enumerate(sub) if s == 1]
+    labels = sub.copy()
+    verdicts = ["substring-match" if s == 0 else "" for s in sub]
+    source = ["substring" if s == 0 else "judge" for s in sub]
+    if idx:
+        if verbose:
+            print(f"  [hybrid] {int((sub == 0).sum())} truthful by substring; "
+                  f"judging {len(idx)} non-match rows ...", flush=True)
+        jl, jinfo = label_by_qa_judge([questions[i] for i in idx], [claims[i] for i in idx],
+                                      [references[i] for i in idx], engine, verbose=verbose)
+        for k, i in enumerate(idx):
+            labels[i] = int(jl[k])
+            verdicts[i] = jinfo["verdict"][k]
+    return labels, {"verdict": verdicts, "source": source}
+
+
 def label_claims(claims, evidences, nli_pipe, top_k: int = 4, ent_thr: float = 0.5,
                  con_thr: float = 0.5, mode: str = "factscore", batch_size: int = 32, verbose: bool = True):
     """claims: list[str]; evidences: list[str] (parallel — each claim's evidence text).

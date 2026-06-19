@@ -35,8 +35,10 @@ def gen_and_cache(dataset_name="triviaqa", n=1200, offset=1000, max_new_tokens=6
 
     regime       : "short"    -> base QA prompt, ~2-word answers (Option A; keeps the eval AUROCs valid)
                    "sentence" -> Instruct chat template, ONE factual sentence (Option B; train == demo)
-    label_method : "bleurt"    -> BLEURT(answer, ref) > 0.5  (subprocess)
-                   "reference" -> any normalized alias is a substring of the answer (cheap, 1-pass)
+    label_method : "llm_judge" -> comparative QA judge: the 8B is shown question + gold answer + the model's
+                                  answer and says correct/incorrect (robust to paraphrase; the proper default)
+                   "bleurt"    -> BLEURT(answer, ref) > 0.5  (subprocess)
+                   "reference" -> any normalized alias is a substring of the answer (cheap, brittle)
     drop_refusals: skip "I don't know"/refusal answers (not claims, not hallucinations) before labeling.
     Returns (df[question, answer, hs_feat_00..70, bleurt, hallucination], sep_feats[N, 135168]).
     """
@@ -58,21 +60,32 @@ def gen_and_cache(dataset_name="triviaqa", n=1200, offset=1000, max_new_tokens=6
         kept_q.append(q); kept_refs.append(rf); answers.append(ans)
         hs_feats.append(hs.features(gen))
         sep_feats.append(sep.features(gen).astype(np.float16))
-    eng.unload(); del eng, sep, hs
     if drop_refusals and verbose:
         print(f"  dropped {n_refused} refusal answers (left the model's 'I don't know' alone)", flush=True)
     if not answers:
+        eng.unload(); del eng, sep, hs
         raise RuntimeError("no answers left after generation / refusal-filtering")
+
+    # Labels. llm_judge reuses the resident 8B, so it MUST run BEFORE the model is unloaded.
+    bleurt = np.full(len(answers), np.nan)
+    if label_method == "llm_judge":
+        from claim_label import label_hybrid
+        if verbose:
+            print(f"  labelling {len(answers)} answers (hybrid: substring-truthful + QA-judge rescue) ...",
+                  flush=True)
+        labels, _ = label_hybrid(kept_q, answers, kept_refs, eng, verbose=verbose)
+    eng.unload(); del eng, sep, hs
 
     if label_method == "reference":
         from claim_label import label_by_reference_match
         labels = label_by_reference_match(answers, kept_refs)
-        bleurt = np.full(len(answers), np.nan)
-    else:
+    elif label_method == "bleurt":
         if verbose:
             print(f"  scoring BLEURT ground-truth labels for {len(answers)} answers "
                   f"(bleurt_env subprocess; ~1-2 min, no per-item bar) ...", flush=True)
         labels, bleurt = bleurt_labels(answers, kept_refs, threshold=0.5, bleurt_python=bleurt_python)
+    elif label_method != "llm_judge":
+        raise ValueError(f"unknown label_method {label_method!r} (use 'llm_judge' | 'reference' | 'bleurt')")
 
     df = pd.DataFrame({"question": kept_q, "answer": answers})
     hs_arr = np.stack(hs_feats)

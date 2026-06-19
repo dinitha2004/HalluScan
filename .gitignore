@@ -26,3 +26,6 @@ trash/
 # OS
 Thumbs.db
 .DS_Store
+
+# Office temp/lock files
+~$*

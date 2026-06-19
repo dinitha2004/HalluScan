@@ -1,0 +1,345 @@
+"""Build notebooks/10_retrain_hallushift.ipynb with nbformat. Re-run to regenerate.
+
+Self-contained HalluShift retrain + evaluation notebook (Option-B sentence head). Diagnoses the
+StandardScaler 'landmine', fixes preprocessing, retrains on judge labels, prints full eval
+(AUROC/AUPR/confusion/ROC-PR/score-hist) on a held-out test split + a real GPU cross-dataset transfer
+check, with a gated save cell. A CONFIG cell lets you scale the training data (more rows + multiple
+datasets) before retraining. See C:/Users/diren/.claude/plans (HalluShift plan).
+
+Run in se_probes_env:  python tools/build_nb10.py
+"""
+import os
+import nbformat as nbf
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NB = os.path.join(ROOT, "notebooks")
+os.makedirs(NB, exist_ok=True)
+
+
+def md(t):
+    return nbf.v4.new_markdown_cell(t)
+
+
+def code(t):
+    return nbf.v4.new_code_cell(t)
+
+
+cells = []
+
+cells.append(md(
+    "# 10 · Retrain & evaluate the Type-2 (sentence) HalluShift head\n\n"
+    "The deployed sentence HalluShift head (`hal_det_sentence_s1`) **collapses on transfer** (cross-eval "
+    "squad/triviaqa flag *everything* — confusion matrices with TN=0/FN=0, AUROC 0.45–0.55). Proven cause "
+    "(two compounding training defects), not a dead signal —\n\n"
+    "**A. A `StandardScaler` landmine.** In the sentence regime ~45/71 HalluShift divergence/cosine "
+    "features are near-constant (std≈0), so the scaler stored `scale_` as low as **1.6e-13**. At inference "
+    "the moment those features deviate from the training mean by even 1e-4 (any new dataset), "
+    "`(x-mean)/1.6e-13` explodes to ~1e8–1e12 and saturates the LayerNorm `CombinedNN` → constant output "
+    "→ flags everything.\n\n"
+    "**B. Underfit MLP.** In-distribution held-out the deployed `CombinedNN` reaches only ~0.65 (flat) "
+    "while a plain logistic regression on the *same features and split* hits ~0.79.\n\n"
+    "This notebook: **(0)** optionally **builds a larger / more-diverse training set** (GPU), **(1)** loads "
+    "the (judge-labelled) build + one shared split, **(2)** reproduces the landmine proof on the deployed "
+    "head, **(3)** fixes the scaler, **(4)** retrains a `CombinedNN` + logreg, **(5)** full held-out eval, "
+    "**(6)** perturbation stability, **(7)** real cross-dataset transfer eval (GPU), **(8)** gated save. "
+    "Run in se_probes_env. **Save is OFF by default — review first.**"
+))
+
+# ---- setup ----
+cells.append(code(
+    "import os, sys\n"
+    "os.environ.setdefault('HF_HOME', r'D:/LLAMA CACHE/huggingface')\n"
+    "sys.path.insert(0, os.path.abspath(os.path.join('..', 'hallking')))\n"
+    "sys.path.insert(0, os.path.abspath(os.path.join('..', 'tools')))\n"
+    "import warnings; warnings.filterwarnings('ignore')\n"
+    "import numpy as np, pandas as pd, torch, pickle\n"
+    "import matplotlib.pyplot as plt\n"
+    "from sklearn.model_selection import train_test_split\n"
+    "from sklearn.preprocessing import StandardScaler\n"
+    "from sklearn.linear_model import LogisticRegression\n"
+    "from sklearn.metrics import roc_auc_score\n"
+    "import metrics as M\n"
+    "from classifier import CombinedNN\n"
+    "ROOT = os.path.abspath('..')\n"
+    "DATA = os.path.join(ROOT, 'data'); ART = os.path.join(ROOT, 'artifacts', 'hallushift')\n"
+    "HS = [f'hs_feat_{j:02d}' for j in range(71)]\n"
+    "SEED = 42\n"
+    "print('torch', torch.__version__)"
+))
+
+# ---- CONFIG ----
+cells.append(md(
+    "## 0 · Config — choose the training set (and whether to scale it up)\n"
+    "- **Reproduce the baseline:** leave everything as-is (`TRAIN_TAG='s1j'`, `BUILD=False`) — trains on "
+    "the cached TriviaQA-only judge-labelled build (~500 rows).\n"
+    "- **Scale up (recommended next step):** set `BUILD=True` and pick a new `TRAIN_TAG` (e.g. `'s2'`). "
+    "Transfer is helped more by **dataset diversity** than raw volume, so `BUILD_DATASETS` defaults to "
+    "triviaqa+squad. `BUILD_OFFSETS` keeps the squad *training* questions **disjoint** from the squad "
+    "*transfer* set (offset 0) so there is no leakage. This build is a **GPU** pass (one 8B load, a few min)."
+))
+cells.append(code(
+    "# ---- training set ------------------------------------------------------------------------\n"
+    "TRAIN_TAG = 's1j'          # cached build to train on: 's1j' (TriviaQA-only baseline) or a NEW tag you build below\n"
+    "BUILD     = False          # True -> regenerate a larger/multi-dataset training set (GPU). False -> reuse cache.\n"
+    "BUILD_DATASETS = ['triviaqa', 'squad']     # diversity helps transfer more than raw volume\n"
+    "BUILD_N        = 1200                       # questions PER dataset (refusal-drop yields fewer rows)\n"
+    "BUILD_OFFSETS  = {'triviaqa': 0, 'squad': 500}  # squad train offset disjoint from the squad TRANSFER set (offset 0)\n"
+    "# ---- transfer eval target (held-out) -----------------------------------------------------\n"
+    "TRANSFER_DS, TRANSFER_N, TRANSFER_OFFSET = 'squad', 200, 0   # squad offset 0 is already cached from the audit\n"
+    "# ------------------------------------------------------------------------------------------\n"
+    "print(f'TRAIN_TAG={TRAIN_TAG} | BUILD={BUILD} | transfer={TRANSFER_DS}@{TRANSFER_OFFSET}')"
+))
+
+# ---- optional build ----
+cells.append(md(
+    "### 0b · (optional, GPU) build the larger training set\n"
+    "Generates one factual sentence per question for each dataset (sentence regime, `DEMO_FACTUAL` prompt), "
+    "caches the 71-d HalluShift features + **judge** labels, drops refusals → "
+    "`data/claims_sent_<TRAIN_TAG>.parquet`. Skipped when `BUILD=False`."
+))
+cells.append(code(
+    "build_path = os.path.join(DATA, f'claims_sent_{TRAIN_TAG}.parquet')\n"
+    "if BUILD:\n"
+    "    import retrain   # per-dataset offsets (train_claim_heads.build only takes one offset for all datasets)\n"
+    "    parts = []\n"
+    "    for ds in BUILD_DATASETS:\n"
+    "        off = BUILD_OFFSETS.get(ds, 0)\n"
+    "        di, _ = retrain.gen_and_cache(ds, n=BUILD_N, offset=off, regime='sentence',\n"
+    "                                      label_method='llm_judge', drop_refusals=True)\n"
+    "        di['source'] = f'qa:{ds}'; parts.append(di)\n"
+    "    bdf = pd.concat(parts, ignore_index=True)\n"
+    "    bdf.to_parquet(build_path)\n"
+    "    print('BUILT', build_path, bdf.shape, '|', bdf['source'].value_counts().to_dict(),\n"
+    "          f'| halluc={bdf[\"hallucination\"].mean()*100:.1f}%')\n"
+    "else:\n"
+    "    print(f'BUILD=False -> using cached {os.path.relpath(build_path, ROOT)}')"
+))
+
+# ---- 1. load + split ----
+cells.append(md(
+    "## 1 · Load the chosen build + one shared split\n"
+    "`data/claims_sent_<TRAIN_TAG>.parquet` carries the cached 71-d HalluShift features and the "
+    "`hallucination` (judge) labels. One stratified 75/25 split (seed 42) is reused by every model so the "
+    "held-out AUROCs are directly comparable; a small validation slice is carved out of TRAIN for early "
+    "stopping (TEST stays untouched)."
+))
+cells.append(code(
+    "df = pd.read_parquet(build_path).reset_index(drop=True)\n"
+    "y = df['hallucination'].to_numpy().astype(int)\n"
+    "X = df[HS].to_numpy(np.float64)\n"
+    "src = df['source'].value_counts().to_dict() if 'source' in df else 'n/a'\n"
+    "print(f'n={len(df)} | halluc={y.mean()*100:.1f}% | sources={src}')\n"
+    "if 'hallucination_refmatch' in df:   # s1j only: how many substring labels the judge corrected\n"
+    "    print('judge corrected', int((df.hallucination.to_numpy() != df.hallucination_refmatch.to_numpy()).sum()),\n"
+    "          'substring labels')\n"
+    "tr_all, te = train_test_split(np.arange(len(df)), test_size=0.25, stratify=y, random_state=SEED)\n"
+    "tr, va = train_test_split(tr_all, test_size=0.20, stratify=y[tr_all], random_state=SEED)\n"
+    "print(f'train={len(tr)} val={len(va)} test={len(te)} | test halluc={y[te].mean()*100:.1f}%')"
+))
+
+# ---- 2. diagnose landmine ----
+cells.append(md(
+    "## 2 · Reproduce the diagnosis (deployed head + the scaler landmine)\n"
+    "Load the **deployed** `s1` head, score the test split (flat, AUROC≈0.6), then perturb only the "
+    "near-constant feature columns by +1e-4 and watch the output collapse to a constant (AUROC → 0.5) — "
+    "exactly what a new dataset does to those features."
+))
+cells.append(code(
+    "old_sc = pickle.load(open(os.path.join(ART, 'hal_det_sentence_s1_scaler.pkl'), 'rb'))\n"
+    "old_m = CombinedNN(32); old_m.load_state_dict(torch.load(os.path.join(ART, 'hal_det_sentence_s1_model.pth'), map_location='cpu', weights_only=True)); old_m.eval()\n"
+    "def score_combined(model, scaler, Xraw):\n"
+    "    with torch.no_grad():\n"
+    "        return torch.sigmoid(model(torch.tensor(scaler.transform(Xraw), dtype=torch.float32))).numpy().ravel()\n"
+    "old_out = score_combined(old_m, old_sc, X)\n"
+    "print(f'DEPLOYED s1 head  test AUROC={roc_auc_score(y[te], old_out[te]):.3f}  output std={old_out.std():.3f} (flat)')\n"
+    "scale = np.asarray(old_sc.scale_); dead_old = np.where(scale < 1e-6)[0]\n"
+    "print(f'features with scale_<1e-6: {len(dead_old)}  (1/scale up to {1/scale.min():.1e})')\n"
+    "print('\\nperturbation test on the DEPLOYED head (shift only the dead cols):')\n"
+    "for eps in [0.0, 1e-4, 1e-2]:\n"
+    "    Xp = X[te].copy(); Xp[:, dead_old] += eps\n"
+    "    o = score_combined(old_m, old_sc, Xp)\n"
+    "    print(f'  +{eps:<6}: out std={o.std():.4f} AUROC={roc_auc_score(y[te], o):.3f} max|scaled|={np.abs(old_sc.transform(Xp)).max():.1e}')"
+))
+
+# ---- 3. fix preprocessing ----
+cells.append(md(
+    "## 3 · Fix the preprocessing — neutralise the dead features\n"
+    "Refit `StandardScaler` on TRAIN only, then set `scale_ = 1.0` for any feature whose training variance "
+    "is ~0 (`var_ < 1e-12`). Those features carry no learnable signal anyway; neutralising them means a "
+    "downstream distribution shift produces a *small* value (÷1) instead of an exploding one (÷1e-13). "
+    "Informative small-magnitude features are left untouched."
+))
+cells.append(code(
+    "fix_sc = StandardScaler().fit(X[tr_all])\n"
+    "dead_mask = fix_sc.var_ < 1e-12\n"
+    "fix_sc.scale_[dead_mask] = 1.0\n"
+    "live = np.where(~dead_mask)[0]\n"
+    "print(f'neutralised {int(dead_mask.sum())} constant features; {len(live)} live features kept')\n"
+    "Xp = X[te].copy(); Xp[:, np.where(dead_mask)[0]] += 1e-2\n"
+    "print(f'max|scaled| under FIXED scaler after +1e-2 shift = {np.abs(fix_sc.transform(Xp)).max():.2f} (was ~1e10)')"
+))
+
+# ---- 4. train candidates ----
+cells.append(md(
+    "## 4 · Train two candidate heads on the cleaned features (TRAIN split)\n"
+    "**(a) `CombinedNN` trained properly** — minibatching + `BCEWithLogits(pos_weight)` + AdamW, early "
+    "stop on val AUROC (vs the deployed head's single full-batch step/epoch). **(b) Regularised logistic "
+    "regression** baseline. The 71-feature layout is preserved for `CombinedNN` (the fixed scaler defuses "
+    "the dead cols); logreg uses the live features."
+))
+cells.append(code(
+    "torch.manual_seed(SEED); np.random.seed(SEED)\n"
+    "Xs = fix_sc.transform(X)\n"
+    "Xtr_t = torch.tensor(Xs[tr], dtype=torch.float32); ytr_t = torch.tensor(y[tr], dtype=torch.float32).unsqueeze(1)\n"
+    "Xva_t = torch.tensor(Xs[va], dtype=torch.float32)\n"
+    "pos_w = torch.tensor([(y[tr] == 0).sum() / max((y[tr] == 1).sum(), 1)], dtype=torch.float32)\n"
+    "net = CombinedNN(32)\n"
+    "opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)\n"
+    "crit = torch.nn.BCEWithLogitsLoss(pos_weight=pos_w)\n"
+    "dl = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(Xtr_t, ytr_t), batch_size=32, shuffle=True)\n"
+    "best_auc, best_state, patience, bad = -1, None, 40, 0\n"
+    "for ep in range(400):\n"
+    "    net.train()\n"
+    "    for xb, yb in dl:\n"
+    "        opt.zero_grad(); crit(net(xb), yb).backward(); opt.step()\n"
+    "    net.eval()\n"
+    "    with torch.no_grad():\n"
+    "        pv = torch.sigmoid(net(Xva_t)).numpy().ravel()\n"
+    "    auc = roc_auc_score(y[va], pv)\n"
+    "    if auc > best_auc:\n"
+    "        best_auc, best_state, bad = auc, {k: v.detach().clone() for k, v in net.state_dict().items()}, 0\n"
+    "    else:\n"
+    "        bad += 1\n"
+    "        if bad >= patience:\n"
+    "            print(f'early stop @ epoch {ep} (best val AUROC={best_auc:.3f})'); break\n"
+    "net.load_state_dict(best_state); net.eval()\n"
+    "with torch.no_grad():\n"
+    "    new_nn_out = torch.sigmoid(net(torch.tensor(Xs, dtype=torch.float32))).numpy().ravel()\n"
+    "print(f'CombinedNN (fixed): val AUROC={best_auc:.3f}')\n"
+    "lr = LogisticRegression(max_iter=5000, C=1.0, class_weight='balanced')\n"
+    "lr.fit(Xs[tr_all][:, live], y[tr_all])\n"
+    "new_lr_out = lr.predict_proba(Xs[:, live])[:, 1]\n"
+    "print('logreg fit on', len(live), 'live features')"
+))
+
+# ---- 5. full eval ----
+cells.append(md(
+    "## 5 · Full held-out evaluation (TEST split) — old vs new candidates\n"
+    "AUROC / AUPR / Accuracy / Precision / Recall / F1 at the F1-optimal threshold, the confusion matrix, "
+    "ROC + PR curves, and the score histogram (to confirm the new head is no longer flat)."
+))
+cells.append(code(
+    "cands = {'OLD CombinedNN (s1)': old_out, f'NEW CombinedNN ({TRAIN_TAG}, fixed)': new_nn_out, f'NEW LogReg ({TRAIN_TAG})': new_lr_out}\n"
+    "res = {}\n"
+    "for name, s in cands.items():\n"
+    "    m = M.detector_metrics(y[te], s[te], threshold=M.best_threshold(y[te], s[te]))\n"
+    "    M.attach_curves(m, y[te], s[te]); res[name] = m\n"
+    "print(M.summary_table(res).to_string())\n"
+    "print('\\noutput std (flat<->spread):', {k: round(float(v[te].std()), 3) for k, v in cands.items()})\n"
+    "for name, m in res.items():\n"
+    "    print(f'  {name}: CM={m[\"confusion_matrix\"].tolist()}  [[TN,FP],[FN,TP]]')"
+))
+cells.append(code(
+    "fig, ax = plt.subplots(1, 2, figsize=(12, 4.2)); M.plot_roc(ax[0], res); M.plot_pr(ax[1], res)\n"
+    "plt.tight_layout(); plt.show()\n"
+    "fig, axes = plt.subplots(1, 3, figsize=(14, 3.6))\n"
+    "for axx, (name, m) in zip(axes, res.items()):\n"
+    "    M.plot_confusion(axx, m['confusion_matrix'], title=f'{name}\\nAUROC={m[\"AUROC\"]:.3f} F1={m[\"F1\"]:.2f}')\n"
+    "plt.tight_layout(); plt.show()\n"
+    "fig, ax = plt.subplots(figsize=(8, 3.5))\n"
+    "for name, s in cands.items():\n"
+    "    ax.hist(s[te], bins=25, alpha=0.5, label=name)\n"
+    "ax.set_title('score distribution on TEST (flat head = single spike)'); ax.legend(fontsize=8); plt.show()"
+))
+
+# ---- 6. stability ----
+cells.append(md(
+    "## 6 · Stability check — the landmine is gone\n"
+    "Re-run the perturbation on the **new** `CombinedNN` (fixed scaler). Output std should stay > 0 and "
+    "AUROC stable — proof the transfer-collapse mechanism is fixed."
+))
+cells.append(code(
+    "print('perturbation test on the NEW CombinedNN (fixed scaler):')\n"
+    "for eps in [0.0, 1e-4, 1e-2, 1e-1]:\n"
+    "    Xp = X[te].copy(); Xp[:, np.where(dead_mask)[0]] += eps\n"
+    "    with torch.no_grad():\n"
+    "        o = torch.sigmoid(net(torch.tensor(fix_sc.transform(Xp), dtype=torch.float32))).numpy().ravel()\n"
+    "    print(f'  +{eps:<6}: out std={o.std():.4f} AUROC={roc_auc_score(y[te], o):.3f}')"
+))
+
+# ---- 7. transfer ----
+cells.append(md(
+    "## 7 · Real cross-dataset transfer eval (GPU)\n"
+    "Score the old vs new heads on a held-out target (`TRANSFER_DS@TRANSFER_OFFSET`). Cached to "
+    "`data/claims_sent_<DS>_transfer.parquet` (squad@0 already exists from the audit), so re-runs are "
+    "instant. **Leakage note:** if `TRANSFER_DS` is in `BUILD_DATASETS`, keep the offsets disjoint — then "
+    "this measures held-out-question generalisation; for *pure* cross-dataset transfer choose a "
+    "`TRANSFER_DS` not in the training set."
+))
+cells.append(code(
+    "if TRANSFER_DS in BUILD_DATASETS and BUILD:\n"
+    "    print(f'NOTE: {TRANSFER_DS} is in BUILD_DATASETS -> ensure train offset '\n"
+    "          f'({BUILD_OFFSETS.get(TRANSFER_DS, 0)}) and transfer offset ({TRANSFER_OFFSET}) are disjoint '\n"
+    "          f'(train pulls {BUILD_N} Qs). This is held-out-question generalisation, not pure transfer.')\n"
+    "TPATH = os.path.join(DATA, f'claims_sent_{TRANSFER_DS}_transfer.parquet')\n"
+    "if os.path.exists(TPATH):\n"
+    "    tdf = pd.read_parquet(TPATH); print('loaded cached transfer set', tdf.shape)\n"
+    "else:\n"
+    "    import retrain\n"
+    "    tdf, _ = retrain.gen_and_cache(TRANSFER_DS, n=TRANSFER_N, offset=TRANSFER_OFFSET, regime='sentence',\n"
+    "                                   label_method='llm_judge', drop_refusals=True)\n"
+    "    tdf.to_parquet(TPATH); print('generated + cached transfer set', tdf.shape)\n"
+    "yT = tdf['hallucination'].to_numpy().astype(int); XT = tdf[HS].to_numpy(np.float64)\n"
+    "print(f'{TRANSFER_DS} transfer: n={len(tdf)} halluc={yT.mean()*100:.1f}%')"
+))
+cells.append(code(
+    "old_T = score_combined(old_m, old_sc, XT)\n"
+    "with torch.no_grad():\n"
+    "    new_T = torch.sigmoid(net(torch.tensor(fix_sc.transform(XT), dtype=torch.float32))).numpy().ravel()\n"
+    "new_lrT = lr.predict_proba(fix_sc.transform(XT)[:, live])[:, 1]\n"
+    "tcands = {'OLD CombinedNN (s1)': old_T, f'NEW CombinedNN ({TRAIN_TAG}, fixed)': new_T, f'NEW LogReg ({TRAIN_TAG})': new_lrT}\n"
+    "tres = {}\n"
+    "for name, s in tcands.items():\n"
+    "    m = M.detector_metrics(yT, s, threshold=M.best_threshold(yT, s)); M.attach_curves(m, yT, s); tres[name] = m\n"
+    "print(f'=== {TRANSFER_DS.upper()} TRANSFER (heads trained on {TRAIN_TAG}) ==='); print(M.summary_table(tres).to_string())\n"
+    "print('output std:', {k: round(float(v.std()), 3) for k, v in tcands.items()})\n"
+    "for name, m in tres.items():\n"
+    "    print(f'  {name}: CM={m[\"confusion_matrix\"].tolist()}')\n"
+    "fig, axes = plt.subplots(1, 3, figsize=(14, 3.6))\n"
+    "for axx, (name, m) in zip(axes, tres.items()):\n"
+    "    M.plot_confusion(axx, m['confusion_matrix'], title=f'{name}\\nAUROC={m[\"AUROC\"]:.3f}')\n"
+    "plt.tight_layout(); plt.show()"
+))
+
+# ---- 8. gated save ----
+cells.append(md(
+    "## 8 · Save the new head (gated — `SAVE=False` by default)\n"
+    "**Do not save yet.** Review the held-out + transfer tables first. Save only if the new head beats the "
+    "old on **both** (AUROC up, confusion matrix no longer degenerate). Writes `hal_det_sentence_<TAG>_*` "
+    "— never overwrites the deployed `s1`. The kept-feature index list is saved so inference applies the "
+    "same neutralised scaler."
+))
+cells.append(code(
+    "SAVE = False               # <-- leave False for now (per instruction). Flip only after the tables look good.\n"
+    "WHICH = 'combinednn'       # 'combinednn' or 'logreg'\n"
+    "if SAVE:\n"
+    "    tag = TRAIN_TAG\n"
+    "    pickle.dump(fix_sc, open(os.path.join(ART, f'hal_det_sentence_{tag}_scaler.pkl'), 'wb'))\n"
+    "    np.save(os.path.join(ART, f'hal_det_sentence_{tag}_live_features.npy'), live)\n"
+    "    if WHICH == 'combinednn':\n"
+    "        torch.save(net.state_dict(), os.path.join(ART, f'hal_det_sentence_{tag}_model.pth'))\n"
+    "    else:\n"
+    "        pickle.dump(lr, open(os.path.join(ART, f'hal_det_sentence_{tag}_logreg.pkl'), 'wb'))\n"
+    "    print('saved', WHICH, f'-> hal_det_sentence_{tag}_*  (s1 artifacts untouched)')\n"
+    "else:\n"
+    "    print('SAVE=False — nothing written. Review the eval + transfer tables, then set SAVE=True.')"
+))
+
+nb = nbf.v4.new_notebook()
+nb.cells = cells
+nb.metadata["kernelspec"] = {"name": "hallking", "display_name": "HallKing (se_probes_env)",
+                             "language": "python"}
+path = os.path.join(NB, "10_retrain_hallushift.ipynb")
+with open(path, "w", encoding="utf-8") as f:
+    nbf.write(nb, f)
+print("wrote", path)

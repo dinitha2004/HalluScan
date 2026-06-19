@@ -39,6 +39,10 @@ USE_CLAIM_FILTER = os.environ.get("HALLKING_CLAIM_FILTER", "1") not in ("0", "fa
 # override with HALLKING_SENTENCE_TAG. Option A (short-QA) is retired from serving — it over-flagged long
 # answers — though its training code/artifacts remain for the notebooks.
 SENTENCE_TAG = os.environ.get("HALLKING_SENTENCE_TAG", "s1")
+# Observe a retrained HalluShift head live WITHOUT changing the served (TSV-only) fusion: this loads ONLY
+# the HalluShift head from hal_det_sentence_<HALLUSHIFT_TAG>_*, leaving SEP/TSV/fusion on SENTENCE_TAG. The
+# per-sentence `hallushift` number in /infer then reflects the new head (display/diagnostic, not fused).
+HALLUSHIFT_TAG = os.environ.get("HALLKING_HALLUSHIFT_TAG", SENTENCE_TAG)
 # answer length: room for a full multi-sentence answer the demo defragments + scores per sentence.
 MAX_NEW_TOKENS = int(os.environ.get("HALLKING_MAX_NEW_TOKENS", "256"))
 
@@ -53,8 +57,9 @@ STATE = {"pipe": None, "error": None}
 async def lifespan(app: FastAPI):
     try:
         print(f"[HallKing] loading pipeline (dataset={DATASET}, sentence regime tag={SENTENCE_TAG}, "
-              f"single Instruct model) ...", flush=True)
-        pipe = HallKingPipeline(dataset=DATASET, separate_tsv=False, sentence_tag=SENTENCE_TAG).load()
+              f"hallushift_tag={HALLUSHIFT_TAG}, single Instruct model) ...", flush=True)
+        pipe = HallKingPipeline(dataset=DATASET, separate_tsv=False, sentence_tag=SENTENCE_TAG,
+                                hs_tag=HALLUSHIFT_TAG).load()
         fusion_path = os.path.join(ROOT, "models", f"fusion_claim_{SENTENCE_TAG}.pkl")
         if os.path.exists(fusion_path):
             pipe.fusion = FusionModel.load(fusion_path)
@@ -106,6 +111,7 @@ def status():
         "dataset": DATASET,
         "regime": "sentence",
         "sentence_tag": SENTENCE_TAG,
+        "hallushift_tag": HALLUSHIFT_TAG,
         "t_med": pipe.t_med if pipe is not None else None,
         "t_high": pipe.t_high if pipe is not None else None,
         "claim_detector": "nli" if claim_detector.nli_available else "regex-only",

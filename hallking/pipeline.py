@@ -31,11 +31,15 @@ class HallKingPipeline:
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME, dataset: str = "truthfulqa",
                  sep_probe: str = "llama3-triviaqa", load_in_4bit: bool = True, hf_token=True,
                  separate_tsv: bool = True, tsv_model: str = BASE_MODEL, retrained: bool = False,
-                 sentence_tag: str = None):
+                 sentence_tag: str = None, hs_tag: str = None):
         # sentence_tag (Option B): load the per-sentence heads trained by tools/train_claim_heads.py
         # (artifacts suffixed `_sentence_<tag>`) and generate in the sentence regime. Heads are fp16,
         # like the Option-A retrained heads. Default None keeps the Option-A short-QA path untouched.
+        # hs_tag: load ONLY the HalluShift head from a DIFFERENT sentence tag (SEP/TSV/fusion stay on
+        # sentence_tag). Used to observe a retrained HalluShift head live without touching the served
+        # TSV-only fusion. Defaults to sentence_tag (no change).
         self.sentence_tag = sentence_tag
+        self.hs_tag = hs_tag
         self.retrained = retrained or (sentence_tag is not None)
         self.engine = HallKingEngine(model_name=model_name, load_in_4bit=load_in_4bit,
                                      hf_token=hf_token, fp16_nonquant=self.retrained)
@@ -63,9 +67,13 @@ class HallKingPipeline:
             tag = self.sentence_tag
             self.sep = SEPAdapter(self.engine, probe_path=os.path.join(art, "sep", f"probes_sentence_{tag}.pkl"),
                                   probe_name=f"sentence_{tag}").load()
+            hs_tag = self.hs_tag or tag   # HalluShift can come from a different tag (display/eval only)
+            if hs_tag != tag:
+                print(f"[HallKing] HalluShift head overridden to tag '{hs_tag}' "
+                      f"(SEP/TSV/fusion stay on '{tag}')", flush=True)
             self.hs = HalluShiftAdapter(self.engine, dataset=self.dataset).load(
-                model_path=os.path.join(art, "hallushift", f"hal_det_sentence_{tag}_model.pth"),
-                scaler_path=os.path.join(art, "hallushift", f"hal_det_sentence_{tag}_scaler.pkl"))
+                model_path=os.path.join(art, "hallushift", f"hal_det_sentence_{hs_tag}_model.pth"),
+                scaler_path=os.path.join(art, "hallushift", f"hal_det_sentence_{hs_tag}_scaler.pkl"))
         elif self.retrained:
             self.sep = SEPAdapter(self.engine, probe_path=os.path.join(art, "sep", "probes_retrained.pkl"),
                                   probe_name="retrained").load()

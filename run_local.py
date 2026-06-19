@@ -5,6 +5,7 @@
     python run_local.py --dev       # Vite hot-reload (:5173) + backend (:8000)
     python run_local.py --no-build  # reuse the existing frontend/dist (faster restart)
     python run_local.py --sentence-tag s1   # serve a specific Option-B head set (default s1)
+    python run_local.py --hallushift-tag s2 # serve s1 heads but show the s2 HalluShift score (un-fused, display-only)
     python run_local.py --port 8080 --python "C:/path/to/se_probes_env/Scripts/python.exe"
 
 The backend needs the se_probes_env (torch / transformers / bitsandbytes); on Windows it is auto-detected.
@@ -73,6 +74,10 @@ def main():
     ap.add_argument("--python", default=None, help="python for the backend (default: se_probes_env on Windows)")
     ap.add_argument("--sentence-tag", default="s1",
                     help="Option-B per-sentence head tag the demo serves (default s1; sets HALLKING_SENTENCE_TAG)")
+    ap.add_argument("--hallushift-tag", default=None,
+                    help="load ONLY the HalluShift head from this tag (e.g. s2) while SEP/TSV/fusion stay on "
+                         "--sentence-tag; the per-sentence hallushift number reflects it (display-only, not fused). "
+                         "Default: same as --sentence-tag.")
     args = ap.parse_args()
 
     py = backend_python(args.python)
@@ -91,10 +96,11 @@ def main():
                 build_frontend()
             url = f"http://localhost:{args.port}"
 
+        hs_tag = args.hallushift_tag or args.sentence_tag
         env = {**os.environ, "PORT": str(args.port), "PYTHONUNBUFFERED": "1",
-               "HALLKING_SENTENCE_TAG": args.sentence_tag}
-        print(f"[run_local] starting backend (uvicorn) on :{args.port} (sentence_tag={args.sentence_tag}) ...",
-              flush=True)
+               "HALLKING_SENTENCE_TAG": args.sentence_tag, "HALLKING_HALLUSHIFT_TAG": hs_tag}
+        print(f"[run_local] starting backend (uvicorn) on :{args.port} "
+              f"(sentence_tag={args.sentence_tag}, hallushift_tag={hs_tag}) ...", flush=True)
         procs.append(subprocess.Popen([py, "-m", "uvicorn", "app:app", "--host", "0.0.0.0",
                                        "--port", str(args.port)], cwd=BACKEND, env=env))
 

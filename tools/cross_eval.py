@@ -35,21 +35,42 @@ HS_COLS = [f"hs_feat_{j:02d}" for j in range(71)]
 
 
 def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0,
-                   max_new_tokens=64, save=True, verbose=True):
+                   max_new_tokens=64, head_set="retrained", label_method=None, save=True, verbose=True):
+    """head_set selects which trained head set + generation regime to benchmark:
+      "retrained"     -> Type-1 short-QA heads, regime="short" (nb5).
+      "sentence_<tag>"-> Type-2 sentence heads (e.g. sentence_s1), regime="sentence" (nb5b).
+    label_method overrides the eval labeller (default: 'bleurt' for retrained, 'llm_judge' for sentence).
+    Pass label_method='llm_judge' for the retrained set too: BLEURT-20@0.5 mislabels short correct answers
+    ("Gold"/"1993" -> halluc), inflating the halluc rate to 40-70% and making the F1s meaningless."""
     ART = os.path.join(ROOT, "artifacts")
-    sep_pkl = os.path.join(ART, "sep", "probes_retrained.pkl")
-    hs_model = os.path.join(ART, "hallushift", f"hal_det_retrained_{train_ds}_model.pth")
-    hs_scaler = os.path.join(ART, "hallushift", f"hal_det_retrained_{train_ds}_scaler.pkl")
-    tsv_ckpt = os.path.join(ART, "tsv", "best_checkpoint_retrained.pt")
-    fusion_pkl = os.path.join(ROOT, "models", f"fusion_{train_ds}_oof.pkl")
+    if head_set == "retrained":
+        sep_pkl = os.path.join(ART, "sep", "probes_retrained.pkl")
+        hs_model = os.path.join(ART, "hallushift", f"hal_det_retrained_{train_ds}_model.pth")
+        hs_scaler = os.path.join(ART, "hallushift", f"hal_det_retrained_{train_ds}_scaler.pkl")
+        tsv_ckpt = os.path.join(ART, "tsv", "best_checkpoint_retrained.pt")
+        fusion_pkl = os.path.join(ROOT, "models", f"fusion_{train_ds}_oof.pkl")
+        regime, default_lm, default_drop = "short", "bleurt", False
+    elif head_set.startswith("sentence_"):
+        tag = head_set[len("sentence_"):]
+        sep_pkl = os.path.join(ART, "sep", f"probes_sentence_{tag}.pkl")
+        hs_model = os.path.join(ART, "hallushift", f"hal_det_sentence_{tag}_model.pth")
+        hs_scaler = os.path.join(ART, "hallushift", f"hal_det_sentence_{tag}_scaler.pkl")
+        tsv_ckpt = os.path.join(ART, "tsv", f"best_checkpoint_sentence_{tag}.pt")
+        fusion_pkl = os.path.join(ROOT, "models", f"fusion_sentence_{tag}_3feat.pkl")
+        regime, default_lm, default_drop = "sentence", "llm_judge", True
+    else:
+        raise ValueError(f"unknown head_set {head_set!r} (use 'retrained' or 'sentence_<tag>')")
+    lm = label_method or default_lm                              # eval labeller (override allowed)
+    drop_refusals = True if lm == "llm_judge" else default_drop  # refusals aren't hallucinations -> drop them
     for p in (sep_pkl, hs_model, hs_scaler, tsv_ckpt, fusion_pkl):
         if not os.path.exists(p):
-            raise FileNotFoundError(f"missing trained artifact: {p}\n"
-                                    f"Run notebook 1 + notebook 2 on '{train_ds}' first.")
+            raise FileNotFoundError(f"missing artifact for head_set='{head_set}': {p}")
 
-    # 1. generate + cache features + BLEURT labels on the TARGET dataset (Instruct fp16)
-    print(f"==== 1. generate + cache features on {target_ds} (Instruct fp16) ====", flush=True)
-    df, sep_feats = retrain.gen_and_cache(target_ds, n=n, offset=offset, max_new_tokens=max_new_tokens)
+    # 1. generate + cache features + labels on the TARGET dataset (Instruct fp16)
+    print(f"==== 1. generate + cache features on {target_ds} (regime={regime}, labels={lm}) ====",
+          flush=True)
+    df, sep_feats = retrain.gen_and_cache(target_ds, n=n, offset=offset, max_new_tokens=max_new_tokens,
+                                          regime=regime, label_method=lm, drop_refusals=drop_refusals)
     y = df["hallucination"].to_numpy().astype(int)
     print(f"   n={len(df)}  balance: truthful={int((y==0).sum())} halluc={int(y.sum())} "
           f"({y.mean()*100:.1f}% halluc)")
@@ -91,11 +112,14 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
         mm = detector_metrics(y, s, threshold=best_threshold(y, s))
         rows.append({"detector": name, "AUROC": mm["AUROC"], "AUPR": mm["AUPR"], "F1": mm["F1"]})
     results = pd.DataFrame(rows).set_index("detector").round(3)
-    print(f"\n=== {train_ds} heads -> {target_ds} (transfer, all rows held out) ===")
+    print(f"\n=== {head_set} heads ({train_ds}) -> {target_ds} (transfer, all rows held out) ===")
     print(results.to_string())
 
     if save:
-        out = os.path.join(ROOT, "data", f"{target_ds}_cross_eval.parquet")
+        suffix = "" if head_set == "retrained" else f"_{head_set}"   # don't clobber the Type-1 nb5 parquets
+        if lm != default_lm:                                         # keep the BLEURT-labelled file too
+            suffix += f"_{lm}"
+        out = os.path.join(ROOT, "data", f"{target_ds}_cross_eval{suffix}.parquet")
         keep = ["question", "answer", "sep_entropy", "hallushift", "tsv_margin", "fused",
                 "bleurt", "hallucination"]
         df[keep].to_parquet(out)
@@ -103,8 +127,9 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
     return results, df
 
 
-def evaluate_many(datasets=("nq_open", "squad", "triviaqa"), train_ds="triviaqa", n=300,
-                  offsets=None, max_new_tokens=64, save=True, verbose=True):
+def evaluate_many(datasets=("triviaqa", "squad"), train_ds="triviaqa", n=300,
+                  offsets=None, max_new_tokens=64, head_set="retrained", label_method=None,
+                  save=True, verbose=True):
     """Run evaluate_cross() over several target datasets (one notebook, many datasets).
 
     `offsets` maps dataset -> generation offset; the default keeps TriviaQA HELD-OUT (offset 3000, past
@@ -118,18 +143,22 @@ def evaluate_many(datasets=("nq_open", "squad", "triviaqa"), train_ds="triviaqa"
         if verbose:
             print(f"\n############## {ds}  (n={n}, offset={off}) ##############", flush=True)
         results, df = evaluate_cross(ds, train_ds=train_ds, n=n, offset=off,
-                                     max_new_tokens=max_new_tokens, save=save, verbose=verbose)
+                                     max_new_tokens=max_new_tokens, head_set=head_set,
+                                     label_method=label_method, save=save, verbose=verbose)
         out[ds] = (results, df)
     return out
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", default="nq_open", choices=["nq_open", "squad", "triviaqa", "truthfulqa"])
+    ap.add_argument("--target", default="squad",
+                    choices=["squad", "triviaqa", "truthfulqa"])  # web_questions/nq_open dropped: noisy/stale gold
     ap.add_argument("--train", default="triviaqa", choices=["triviaqa", "truthfulqa"])
     ap.add_argument("--n", type=int, default=None)
     ap.add_argument("--offset", type=int, default=0)
     ap.add_argument("--max_new_tokens", type=int, default=64)
+    ap.add_argument("--head_set", default="retrained", help="'retrained' (Type-1) or 'sentence_s1' (Type-2)")
+    ap.add_argument("--label_method", default=None, help="override labeller, e.g. 'llm_judge' (recommended)")
     args = ap.parse_args()
     evaluate_cross(args.target, args.train, n=args.n, offset=args.offset,
-                   max_new_tokens=args.max_new_tokens)
+                   max_new_tokens=args.max_new_tokens, head_set=args.head_set, label_method=args.label_method)

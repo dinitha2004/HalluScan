@@ -61,6 +61,14 @@ def load_qa(dataset_name: str, n: int = None, offset: int = 0):
         ds = load_dataset("squad", split="validation")
         questions = [r["question"] for r in ds]
         refs = [list(dict.fromkeys(r["answers"]["text"])) for r in ds]
+    elif dataset_name == "web_questions":
+        # WebQuestions — clean factual entity QA (Freebase gold answers), short and STABLE facts
+        # (unlike nq_open's time-sensitive "last X" questions). The LLM-judge labels it reliably,
+        # like TriviaQA. NOTE: use the namespaced "Stanford/web_questions" — the bare canonical id
+        # no longer resolves on this datasets/huggingface_hub version. Schema: question, answers (list).
+        ds = load_dataset("Stanford/web_questions", split="test")
+        questions = [r["question"] for r in ds]
+        refs = [list(r["answers"]) for r in ds]
     else:
         raise ValueError(f"unknown dataset {dataset_name}")
     end = len(questions) if n is None else min(offset + n, len(questions))
