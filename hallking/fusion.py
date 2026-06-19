@@ -40,13 +40,23 @@ class FusionModel:
         self.clf.fit(Xs, y)
         return self
 
-    def predict_proba(self, df) -> np.ndarray:
-        X = df[self.feature_cols].to_numpy(dtype=np.float64)
+    def _proba1(self, X: np.ndarray) -> np.ndarray:
+        """P(hallucination) per row. For logreg, compute it directly from coef_/intercept_ + the scaler stats
+        instead of calling clf.predict_proba(): the sklearn pickle's fitted ARRAYS survive across versions, but
+        predict_proba's internals do not (e.g. sklearn>=1.7 removed `multi_class`, so a model pickled there
+        crashes older sklearn). This keeps the served fusion version-independent. GBM falls back to the method."""
+        X = np.asarray(X, dtype=np.float64)
+        if self.kind == "logreg":
+            Xs = (X - self.scaler.mean_) / self.scaler.scale_
+            z = Xs @ self.clf.coef_.T + self.clf.intercept_       # (n, 1) for binary logreg
+            return (1.0 / (1.0 + np.exp(-z))).ravel()             # sigmoid = P(class 1 = hallucinated)
         return self.clf.predict_proba(self.scaler.transform(X))[:, 1]
 
+    def predict_proba(self, df) -> np.ndarray:
+        return self._proba1(df[self.feature_cols].to_numpy(dtype=np.float64))
+
     def predict_proba_row(self, row: dict) -> float:
-        X = np.array([[row[c] for c in self.feature_cols]], dtype=np.float64)
-        return float(self.clf.predict_proba(self.scaler.transform(X))[0, 1])
+        return float(self._proba1(np.array([[row[c] for c in self.feature_cols]]))[0])
 
     def save(self, path: str):
         with open(path, "wb") as f:
