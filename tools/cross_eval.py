@@ -35,20 +35,27 @@ HS_COLS = [f"hs_feat_{j:02d}" for j in range(71)]
 
 
 def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0,
-                   max_new_tokens=64, head_set="retrained", label_method=None, save=True, verbose=True):
+                   max_new_tokens=64, head_set="retrained", label_method=None, save=True, verbose=True,
+                   fusion_pkl=None, model_name=INSTRUCT_MODEL, judge_model=None):
     """head_set selects which trained head set + generation regime to benchmark:
       "retrained"     -> Type-1 short-QA heads, regime="short" (nb5).
       "sentence_<tag>"-> Type-2 sentence heads (e.g. sentence_s1), regime="sentence" (nb5b).
     label_method overrides the eval labeller (default: 'bleurt' for retrained, 'llm_judge' for sentence).
     Pass label_method='llm_judge' for the retrained set too: BLEURT-20@0.5 mislabels short correct answers
-    ("Gold"/"1993" -> halluc), inflating the halluc rate to 40-70% and making the F1s meaningless."""
+    ("Gold"/"1993" -> halluc), inflating the halluc rate to 40-70% and making the F1s meaningless.
+    fusion_pkl overrides the fusion artifact (default: the head_set's own). The thesis benchmark (nb11) passes
+    models/fusion_triviaqa_crosseval.pkl (the recalibrated rank-mean fusion) here, leaving every other caller
+    on the default so nothing else changes.
+    model_name selects the model under test (default = the 8B); judge_model decouples the label judge (e.g. a
+    strong 8B judging a small 1B's answers — passed through to gen_and_cache). The HalluShift layer count is
+    derived from the cached feature width, so a 1B (39 feats / 16 layers) works with no code change (nb14)."""
     ART = os.path.join(ROOT, "artifacts")
     if head_set == "retrained":
         sep_pkl = os.path.join(ART, "sep", "probes_retrained.pkl")
         hs_model = os.path.join(ART, "hallushift", f"hal_det_retrained_{train_ds}_model.pth")
         hs_scaler = os.path.join(ART, "hallushift", f"hal_det_retrained_{train_ds}_scaler.pkl")
         tsv_ckpt = os.path.join(ART, "tsv", "best_checkpoint_retrained.pt")
-        fusion_pkl = os.path.join(ROOT, "models", f"fusion_{train_ds}_oof.pkl")
+        fusion_default = os.path.join(ROOT, "models", f"fusion_{train_ds}_oof.pkl")
         regime, default_lm, default_drop = "short", "bleurt", False
     elif head_set.startswith("sentence_"):
         tag = head_set[len("sentence_"):]
@@ -56,10 +63,16 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
         hs_model = os.path.join(ART, "hallushift", f"hal_det_sentence_{tag}_model.pth")
         hs_scaler = os.path.join(ART, "hallushift", f"hal_det_sentence_{tag}_scaler.pkl")
         tsv_ckpt = os.path.join(ART, "tsv", f"best_checkpoint_sentence_{tag}.pt")
-        fusion_pkl = os.path.join(ROOT, "models", f"fusion_sentence_{tag}_3feat.pkl")
+        fusion_default = os.path.join(ROOT, "models", f"fusion_sentence_{tag}_3feat.pkl")
         regime, default_lm, default_drop = "sentence", "llm_judge", True
     else:
         raise ValueError(f"unknown head_set {head_set!r} (use 'retrained' or 'sentence_<tag>')")
+    # fusion_pkl override (absolute, or relative-to-ROOT) lets nb11 swap in the recalibrated rank-mean fusion
+    # without disturbing the per-head_set default the other notebooks rely on.
+    if fusion_pkl is None:
+        fusion_pkl = fusion_default
+    elif not os.path.isabs(fusion_pkl):
+        fusion_pkl = os.path.join(ROOT, fusion_pkl)
     lm = label_method or default_lm                              # eval labeller (override allowed)
     drop_refusals = True if lm == "llm_judge" else default_drop  # refusals aren't hallucinations -> drop them
     for p in (sep_pkl, hs_model, hs_scaler, tsv_ckpt, fusion_pkl):
@@ -70,7 +83,8 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
     print(f"==== 1. generate + cache features on {target_ds} (regime={regime}, labels={lm}) ====",
           flush=True)
     df, sep_feats = retrain.gen_and_cache(target_ds, n=n, offset=offset, max_new_tokens=max_new_tokens,
-                                          regime=regime, label_method=lm, drop_refusals=drop_refusals)
+                                          regime=regime, label_method=lm, drop_refusals=drop_refusals,
+                                          instruct_model=model_name, judge_model=judge_model)
     y = df["hallucination"].to_numpy().astype(int)
     print(f"   n={len(df)}  balance: truthful={int((y==0).sum())} halluc={int(y.sum())} "
           f"({y.mean()*100:.1f}% halluc)")
@@ -83,15 +97,19 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
 
     with open(hs_scaler, "rb") as f:
         scaler = pickle.load(f)
-    m = CombinedNN(32); m.load_state_dict(torch.load(hs_model, map_location="cpu", weights_only=True)); m.eval()
-    Xhs = scaler.transform(df[HS_COLS].to_numpy(np.float64))
+    # HalluShift feature width / layer count follow the model under test (71 feats @ 32 layers for the 8B;
+    # 39 @ 16 for a 1B) — derive from the cached columns so the same code scores any model.
+    hs_cols = [c for c in df.columns if c.startswith("hs_feat_")]
+    num_layers = 2 * ((len(hs_cols) - 11) // 4 + 1)
+    m = CombinedNN(num_layers); m.load_state_dict(torch.load(hs_model, map_location="cpu", weights_only=True)); m.eval()
+    Xhs = scaler.transform(df[hs_cols].to_numpy(np.float64))
     with torch.no_grad():
         df["hallushift"] = torch.sigmoid(m(torch.tensor(Xhs, dtype=torch.float32))).numpy().ravel()
 
     # 3. score the trained TSV head on the INSTRUCT model (fp16) — TSV is now Instruct-trained (nb 1b),
     #    so all three detectors share one model and TSV margins are on the matching variant.
     print(f"==== 3. score TSV head (trained on {train_ds}) on Instruct model ====", flush=True)
-    beng = HallKingEngine(model_name=INSTRUCT_MODEL, fp16_nonquant=True).load()
+    beng = HallKingEngine(model_name=model_name, fp16_nonquant=True).load()
     tsv = TSVAdapter(beng, ckpt_path=tsv_ckpt).load()
     from tqdm.auto import tqdm   # live progress bar so the cell visibly advances
     margins = []
@@ -119,6 +137,9 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
         suffix = "" if head_set == "retrained" else f"_{head_set}"   # don't clobber the Type-1 nb5 parquets
         if lm != default_lm:                                         # keep the BLEURT-labelled file too
             suffix += f"_{lm}"
+        if fusion_pkl != fusion_default:                            # a custom fusion (nb11) -> its own file, so
+            stem = os.path.splitext(os.path.basename(fusion_pkl))[0]  # nb5's *_llm_judge parquets stay intact
+            suffix += f"_{stem.replace('fusion_', '')}"            # e.g. ..._triviaqa_crosseval
         out = os.path.join(ROOT, "data", f"{target_ds}_cross_eval{suffix}.parquet")
         keep = ["question", "answer", "sep_entropy", "hallushift", "tsv_margin", "fused",
                 "bleurt", "hallucination"]
@@ -129,7 +150,7 @@ def evaluate_cross(target_ds="truthfulqa", train_ds="triviaqa", n=None, offset=0
 
 def evaluate_many(datasets=("triviaqa", "squad"), train_ds="triviaqa", n=300,
                   offsets=None, max_new_tokens=64, head_set="retrained", label_method=None,
-                  save=True, verbose=True):
+                  save=True, verbose=True, fusion_pkl=None, model_name=INSTRUCT_MODEL, judge_model=None):
     """Run evaluate_cross() over several target datasets (one notebook, many datasets).
 
     `offsets` maps dataset -> generation offset; the default keeps TriviaQA HELD-OUT (offset 3000, past
@@ -144,7 +165,8 @@ def evaluate_many(datasets=("triviaqa", "squad"), train_ds="triviaqa", n=300,
             print(f"\n############## {ds}  (n={n}, offset={off}) ##############", flush=True)
         results, df = evaluate_cross(ds, train_ds=train_ds, n=n, offset=off,
                                      max_new_tokens=max_new_tokens, head_set=head_set,
-                                     label_method=label_method, save=save, verbose=verbose)
+                                     label_method=label_method, save=save, verbose=verbose,
+                                     fusion_pkl=fusion_pkl, model_name=model_name, judge_model=judge_model)
         out[ds] = (results, df)
     return out
 
@@ -152,7 +174,7 @@ def evaluate_many(datasets=("triviaqa", "squad"), train_ds="triviaqa", n=300,
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", default="squad",
-                    choices=["squad", "triviaqa", "truthfulqa"])  # web_questions/nq_open dropped: noisy/stale gold
+                    choices=["squad", "triviaqa", "truthfulqa", "hotpotqa", "popqa", "sciq"])  # web_questions/nq_open dropped: noisy/stale gold
     ap.add_argument("--train", default="triviaqa", choices=["triviaqa", "truthfulqa"])
     ap.add_argument("--n", type=int, default=None)
     ap.add_argument("--offset", type=int, default=0)

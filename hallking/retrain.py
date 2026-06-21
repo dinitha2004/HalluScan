@@ -30,17 +30,22 @@ TSV_PROMPT = "Answer the question concisely. Q: {question} A:{answer}"
 # ---------------------------------------------------------------- GPU: generate + cache features
 def gen_and_cache(dataset_name="triviaqa", n=1200, offset=1000, max_new_tokens=64,
                   instruct_model=INSTRUCT_MODEL, bleurt_python=DEFAULT_BLEURT_PY,
-                  regime="short", label_method="bleurt", drop_refusals=False, verbose=True):
-    """Generate answers + cache RAW per-head features (SEP 135168-d, HalluShift 71-d) + labels.
+                  regime="short", label_method="bleurt", drop_refusals=False, verbose=True,
+                  judge_model=None):
+    """Generate answers + cache RAW per-head features (SEP all-layer SLT stack, HalluShift 4*((L/2)-1)+11) + labels.
 
     regime       : "short"    -> base QA prompt, ~2-word answers (Option A; keeps the eval AUROCs valid)
                    "sentence" -> Instruct chat template, ONE factual sentence (Option B; train == demo)
-    label_method : "llm_judge" -> comparative QA judge: the 8B is shown question + gold answer + the model's
+    label_method : "llm_judge" -> comparative QA judge: a model is shown question + gold answer + the model's
                                   answer and says correct/incorrect (robust to paraphrase; the proper default)
                    "bleurt"    -> BLEURT(answer, ref) > 0.5  (subprocess)
                    "reference" -> any normalized alias is a substring of the answer (cheap, brittle)
     drop_refusals: skip "I don't know"/refusal answers (not claims, not hallucinations) before labeling.
-    Returns (df[question, answer, hs_feat_00..70, bleurt, hallucination], sep_feats[N, 135168]).
+    judge_model  : (llm_judge only) load a SEPARATE model to judge the labels — e.g. a strong 8B judging a
+                   weak 1B's answers. The generation model is unloaded FIRST so only one model is resident at a
+                   time. None (default) judges with the resident generation model (the 8B path is unchanged).
+    Returns (df[question, answer, hs_feat_00..(K-1), bleurt, hallucination], sep_feats[N, D]).
+    The HalluShift feature count K and SEP width D follow the generation model's layer count / hidden dim.
     """
     questions, refs = load_qa(dataset_name, n=n, offset=offset)
     eng = HallKingEngine(model_name=instruct_model, fp16_nonquant=True).load()  # fp16 (matches SEP)
@@ -66,15 +71,27 @@ def gen_and_cache(dataset_name="triviaqa", n=1200, offset=1000, max_new_tokens=6
         eng.unload(); del eng, sep, hs
         raise RuntimeError("no answers left after generation / refusal-filtering")
 
-    # Labels. llm_judge reuses the resident 8B, so it MUST run BEFORE the model is unloaded.
+    # Labels. With the resident judge (judge_model=None), llm_judge reuses the generation model and so MUST
+    # run BEFORE it is unloaded. With a decoupled judge_model we instead unload the generation model first,
+    # then load the judge, so only one model is resident at a time (lets a strong 8B judge a weak 1B's answers).
     bleurt = np.full(len(answers), np.nan)
-    if label_method == "llm_judge":
+    decoupled = (label_method == "llm_judge" and judge_model is not None and judge_model != instruct_model)
+    if label_method == "llm_judge" and not decoupled:
         from claim_label import label_hybrid
         if verbose:
             print(f"  labelling {len(answers)} answers (hybrid: substring-truthful + QA-judge rescue) ...",
                   flush=True)
         labels, _ = label_hybrid(kept_q, answers, kept_refs, eng, verbose=verbose)
     eng.unload(); del eng, sep, hs
+
+    if decoupled:
+        from claim_label import label_hybrid
+        if verbose:
+            print(f"  labelling {len(answers)} answers with decoupled judge '{judge_model}' "
+                  f"(hybrid: substring-truthful + QA-judge rescue) ...", flush=True)
+        judge_eng = HallKingEngine(model_name=judge_model).load()   # 4-bit; the judge only needs .chat()
+        labels, _ = label_hybrid(kept_q, answers, kept_refs, judge_eng, verbose=verbose)
+        judge_eng.unload(); del judge_eng
 
     if label_method == "reference":
         from claim_label import label_by_reference_match
@@ -118,7 +135,10 @@ def retrain_hallushift(df, y, num_layers=32, epochs=300, lr=1e-3, seed=42):
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import roc_auc_score
     from classifier import CombinedNN, AccuracyImprovementLossBinary
-    cols = [f"hs_feat_{j:02d}" for j in range(71)]
+    # HalluShift feature count follows the model's layer count: 4*((L/2)-1) divergence/cosine + 11 prob stats
+    # (= 71 for the 8B's 32 layers, 39 for a 16-layer 1B). CombinedNN(num_layers) below uses the same formula.
+    n_feat = 4 * ((num_layers // 2) - 1) + 11
+    cols = [f"hs_feat_{j:02d}" for j in range(n_feat)]
     X = df[cols].to_numpy(dtype=np.float64); y = np.asarray(y).astype(int)
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=seed)
     scaler = StandardScaler().fit(Xtr)

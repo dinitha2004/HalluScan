@@ -15,12 +15,20 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Files a fresh clone MUST contain for `notebooks/7_backend_colab.ipynb` -> backend/app.py to serve Option B.
 REQUIRED = [
     # Option-B detector artifacts (small, committed — no Git LFS)
+    # 8B (tag s1)
     "artifacts/sep/probes_sentence_s1.pkl",
     "artifacts/hallushift/hal_det_sentence_s1_model.pth",
     "artifacts/hallushift/hal_det_sentence_s1_scaler.pkl",
     "artifacts/tsv/best_checkpoint_sentence_s1.pt",
     "models/fusion_claim_s1.pkl",
     "models/fusion_claim_s1_thresholds.json",
+    # 1B (tag l1b) — the second selectable model
+    "artifacts/sep/probes_sentence_l1b.pkl",
+    "artifacts/hallushift/hal_det_sentence_l1b_model.pth",
+    "artifacts/hallushift/hal_det_sentence_l1b_scaler.pkl",
+    "artifacts/tsv/best_checkpoint_sentence_l1b.pt",
+    "models/fusion_claim_l1b.pkl",
+    "models/fusion_claim_l1b_thresholds.json",
     # backend + the pipeline modules it imports
     "backend/app.py",
     "backend/requirements_colab.txt",

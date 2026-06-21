@@ -64,14 +64,14 @@ const sentenceTooltip = (sent) => {
            `HalluShift ${Number(sent.hallushift).toFixed(2)}  ·  TSV ${Number(sent.tsv_margin).toFixed(3)}`;
 };
 
-const ChatInterface = ({ messages, loading, onSend, highlightEnabled }) => {
+const ChatInterface = ({ messages, loading, onSend, highlightEnabled, disabled = false, notice = '' }) => {
     const [input, setInput] = React.useState('');
     const endRef = useRef(null);
     useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading]);
 
     const handleSubmit = (e) => {
         e.preventDefault();
-        if (!input.trim() || loading) return;
+        if (!input.trim() || loading || disabled) return;
         onSend(input);
         setInput('');
     };
@@ -99,7 +99,7 @@ const ChatInterface = ({ messages, loading, onSend, highlightEnabled }) => {
                 {messages.length === 0 && (
                     <div className="h-full flex flex-col items-center justify-center text-center opacity-30 mt-[-50px]">
                         <Bot size={64} className="mb-4 text-[#0071e3]" />
-                        <h2 className="text-2xl font-semibold">HallKing</h2>
+                        <h2 className="text-2xl font-semibold">HalluScan</h2>
                         <p className="max-w-md mt-2">Ask a question — the answer is checked for hallucination, sentence by sentence.</p>
                     </div>
                 )}
@@ -178,11 +178,16 @@ const ChatInterface = ({ messages, loading, onSend, highlightEnabled }) => {
             </div>
 
             <div className="p-4 bg-white/50 border-t border-gray-100 backdrop-blur-sm">
+                {notice && (
+                    <div className="text-xs text-amber-600 mb-2 flex items-center gap-1.5">
+                        <Loader2 className="animate-spin" size={12} /> {notice}
+                    </div>
+                )}
                 <form onSubmit={handleSubmit} className="relative flex items-center">
                     <input type="text" value={input} onChange={(e) => setInput(e.target.value)}
-                        placeholder="Ask something…" disabled={loading}
-                        className="w-full bg-white border border-gray-200 rounded-full pl-6 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-[#0071e3]/20 focus:border-[#0071e3] transition-all shadow-sm" />
-                    <button type="submit" disabled={!input.trim() || loading}
+                        placeholder={disabled ? (notice || 'Switching model…') : 'Ask something…'} disabled={loading || disabled}
+                        className="w-full bg-white border border-gray-200 rounded-full pl-6 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-[#0071e3]/20 focus:border-[#0071e3] transition-all shadow-sm disabled:bg-gray-50 disabled:cursor-not-allowed" />
+                    <button type="submit" disabled={!input.trim() || loading || disabled}
                         className="absolute right-2 p-2 bg-[#0071e3] text-white rounded-full hover:bg-[#0077ED] disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors">
                         <Send size={20} />
                     </button>

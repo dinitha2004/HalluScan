@@ -14,10 +14,10 @@ const Guidance = ({ onClose }) => {
 
                 <div className="p-6 space-y-6 overflow-y-auto max-h-[80vh]">
                     <section>
-                        <h3 className="text-lg font-semibold mb-2 text-gray-800">How HallKing works</h3>
+                        <h3 className="text-lg font-semibold mb-2 text-gray-800">How HalluScan works</h3>
                         <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4">
                             <p className="text-gray-700 leading-relaxed">
-                                HallKing fuses <strong>three</strong> hallucination signals on a single answer:
+                                HalluScan fuses <strong>three</strong> hallucination signals on a single answer:
                                 <strong> SEP</strong> (semantic-entropy probe), <strong>HalluShift</strong> (cross-layer
                                 distribution shift), and <strong>TSV</strong> (truthfulness steering direction). A small
                                 meta-classifier combines them into one <strong>fused hallucination probability</strong>.

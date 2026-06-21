@@ -1,6 +1,6 @@
-# HallKing — Fused LLM Hallucination Detector (SEP + HalluShift + TSV)
+# HalluScan — Fused LLM Hallucination Detector (SEP + HalluShift + TSV)
 
-HallKing combines three published hallucination detectors into one calibrated detector on a
+HalluScan combines three published hallucination detectors into one calibrated detector on a
 **single shared generation** from **Llama-3.1-8B**, and can **localize which sentence** of a long
 answer is hallucinated. A plain-language overview for non-experts is in
 [`docs/HallKing_Overview.docx`](docs/HallKing_Overview.docx).
@@ -34,7 +34,7 @@ probability — so you can see each lens and the learned combination side by sid
 
 We first tried pure **frozen reuse** (run the published artifacts as-is, fuse). Empirically that fails
 because each frozen artifact only works on its own original dataset + dtype and they **don't co-align**
-on one shared generation (evidence below). So HallKing keeps the **8B LLM completely frozen** but
+on one shared generation (evidence below). So HalluScan keeps the **8B LLM completely frozen** but
 **re-fits the tiny heads** on ONE shared dataset + config (fp16 throughout), which puts all three
 in-distribution together and makes the fusion legitimate. The heads are cheap:
 SEP probe (logistic regression, seconds), HalluShift MLP (~minutes), TSV steering vector + centroids

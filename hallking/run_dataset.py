@@ -69,6 +69,43 @@ def load_qa(dataset_name: str, n: int = None, offset: int = 0):
         ds = load_dataset("Stanford/web_questions", split="test")
         questions = [r["question"] for r in ds]
         refs = [list(r["answers"]) for r in ds]
+    elif dataset_name == "hotpotqa":
+        # HotpotQA val — multi-hop QA with a single short gold `answer` (entity / yes-no / comparison).
+        # Question-only prompt (the supporting paragraphs are dropped to match the shared generation format),
+        # so this is a genuine no-context transfer set. The gold is a STABLE fact, so the LLM-judge labels it
+        # reliably (unlike nq_open's stale time-sensitive gold). Caveat: some multi-hop questions are hard
+        # without context -> a higher honest hallucination rate is expected, not a bug.
+        # The 'distractor' and 'fullwiki' configs share IDENTICAL question/answer pairs in the dev split (they
+        # differ only in the context we drop) -> try whichever is available/cached (some envs cache only one).
+        ds = None
+        for cfg in ("fullwiki", "distractor"):
+            try:
+                ds = load_dataset("hotpot_qa", cfg, split="validation")
+                break
+            except Exception:
+                continue
+        if ds is None:  # surface a clear error rather than the cache's cryptic config message
+            raise RuntimeError("could not load hotpot_qa (tried configs 'fullwiki' and 'distractor'); "
+                               "check the HF cache / network for this env")
+        questions = [r["question"] for r in ds]
+        refs = [[r["answer"]] for r in ds]      # single gold string per question
+    elif dataset_name == "popqa":
+        # PopQA (akariasai/PopQA, test) — closed-book ENTITY factoid QA (subject-relation-object): short,
+        # STABLE answers with alias lists -> the same single-hop recall regime as TriviaQA, paraphrase-robust.
+        # SHUFFLE first: the raw rows are grouped by relation type (all "occupation" Qs together, etc.), so a
+        # sequential slice would sample one relation only. `possible_answers` is a JSON-encoded list string.
+        import json as _json
+        ds = load_dataset("akariasai/PopQA", split="test").shuffle(seed=42)
+        questions = [r["question"] for r in ds]
+        refs = [_json.loads(r["possible_answers"]) if isinstance(r["possible_answers"], str)
+                else list(r["possible_answers"]) for r in ds]
+    elif dataset_name == "sciq":
+        # SciQ (validation) — science exam questions with a single short `correct_answer`. In-regime
+        # short-answer QA; the `support` paragraph is dropped (closed-book, question-only, like the others).
+        # Shuffle (fixed seed) for a representative, reproducible sample.
+        ds = load_dataset("sciq", split="validation").shuffle(seed=42)
+        questions = [r["question"] for r in ds]
+        refs = [[r["correct_answer"]] for r in ds]
     else:
         raise ValueError(f"unknown dataset {dataset_name}")
     end = len(questions) if n is None else min(offset + n, len(questions))

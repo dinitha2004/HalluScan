@@ -40,6 +40,9 @@ function App() {
     const saved = localStorage.getItem('highlight_enabled');
     return saved !== null ? JSON.parse(saved) : true;
   });
+  // Which model answers (registry key, e.g. "8b"/"1b"). Defaults to the backend's default_model once /status
+  // is known; persisted across reloads. Sent on every /infer.
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('halluscan_model') || '');
 
   const setBackendUrl = (url) => {
     const clean = (url || '').trim().replace(/\/+$/, '');
@@ -61,6 +64,7 @@ function App() {
       try {
         const res = await axios.get(`${backendUrl}/status`, { timeout: 4000 });
         setStatus(res.data);
+        setSelectedModel(prev => prev || res.data.current_model || res.data.default_model || '');
       } catch {
         setStatus({ model_loaded: false });
       }
@@ -78,15 +82,19 @@ function App() {
     localStorage.setItem('highlight_enabled', JSON.stringify(highlightEnabled));
   }, [highlightEnabled]);
 
+  useEffect(() => {
+    if (selectedModel) localStorage.setItem('halluscan_model', selectedModel);
+  }, [selectedModel]);
+
   const handleSendMessage = async (text) => {
     setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date() }]);
     setLoading(true);
     try {
-      const res = await axios.post(`${backendUrl}/infer`, { question: text });
-      const { answer, aggregate, sentences } = res.data;
+      const res = await axios.post(`${backendUrl}/infer`, { question: text, model: selectedModel || undefined });
+      const { answer, aggregate, sentences, model } = res.data;
       setMessages(prev => [...prev, {
         role: 'assistant', content: answer || 'Error generating response',
-        aggregate, sentences, timestamp: new Date(),
+        aggregate, sentences, model, timestamp: new Date(),
       }]);
       setHistory(prev => [...prev, {
         question: text.length > 18 ? text.slice(0, 18) + '…' : text,
@@ -100,6 +108,12 @@ function App() {
     }
   };
 
+  const handleSelectModel = async (key) => {
+    setSelectedModel(key);
+    // Pre-load the chosen model so the next question is ready; /status polling drives the "switching…" UI.
+    try { await axios.post(`${backendUrl}/select-model`, { model: key }); } catch { /* /status surfaces errors */ }
+  };
+
   const clearHistory = () => {
     if (window.confirm('Clear all history?')) {
       setMessages([]); setHistory([]);
@@ -110,6 +124,11 @@ function App() {
   const last = messages.length > 0 && messages[messages.length - 1].role === 'assistant'
     && !messages[messages.length - 1].isError ? messages[messages.length - 1] : null;
   const agg = last?.aggregate;
+  const modelLabel = (key) => (status.available_models || []).find(m => m.key === key)?.label || key;
+  // A model swap is in flight when the backend reports `loading`, or the picked model isn't the resident one yet.
+  const switching = !!status.loading
+    || (!!selectedModel && !!status.current_model && selectedModel !== status.current_model);
+  const switchNotice = switching ? `Switching to ${modelLabel(status.loading || selectedModel)}… loading weights` : '';
 
   return (
     <div className="min-h-screen flex flex-col bg-[#f5f5f7] text-[#1d1d1f]">
@@ -121,6 +140,9 @@ function App() {
         onToggleHighlight={() => setHighlightEnabled(p => !p)}
         backendUrl={backendUrl}
         onSetBackendUrl={setBackendUrl}
+        availableModels={status.available_models || []}
+        selectedModel={selectedModel}
+        onSelectModel={handleSelectModel}
       />
 
       {showGuidance && <Guidance onClose={() => setShowGuidance(false)} />}
@@ -129,7 +151,7 @@ function App() {
         {/* Left: Chat */}
         <div className="flex-[2] flex flex-col glass rounded-3xl overflow-hidden shadow-sm h-full max-w-[65%]">
           <ChatInterface messages={messages} loading={loading} onSend={handleSendMessage}
-            highlightEnabled={highlightEnabled} />
+            highlightEnabled={highlightEnabled} disabled={switching} notice={switchNotice} />
         </div>
 
         {/* Right: Risk panel */}
@@ -141,7 +163,9 @@ function App() {
 
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}
             className="glass rounded-3xl p-6 shadow-sm">
-            <h3 className="text-gray-500 text-sm font-medium uppercase tracking-wider mb-3">Last Answer — Risk</h3>
+            <h3 className="text-gray-500 text-sm font-medium uppercase tracking-wider mb-3">
+              Last Answer — Risk{last?.model ? ` · ${modelLabel(last.model)}` : ''}
+            </h3>
             {agg ? (
               <div className="space-y-4">
                 <div className="p-4 rounded-2xl bg-white/50 text-center">

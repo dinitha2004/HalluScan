@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { ShieldCheck, HelpCircle, Eye, EyeOff, Server } from 'lucide-react';
+import { ShieldCheck, HelpCircle, Eye, EyeOff, Server, Cpu } from 'lucide-react';
 
 const Navbar = ({ status, onClear, onShowGuidance, highlightEnabled, onToggleHighlight,
-                  backendUrl, onSetBackendUrl }) => {
+                  backendUrl, onSetBackendUrl, availableModels = [], selectedModel, onSelectModel }) => {
     const [draft, setDraft] = useState(backendUrl || '');
     useEffect(() => { setDraft(backendUrl || ''); }, [backendUrl]);
 
@@ -15,11 +15,11 @@ const Navbar = ({ status, onClear, onShowGuidance, highlightEnabled, onToggleHig
                     <ShieldCheck size={24} />
                 </div>
                 <div>
-                    <h1 className="font-semibold text-lg tracking-tight text-[#1d1d1f]">HallKing</h1>
+                    <h1 className="font-semibold text-lg tracking-tight text-[#1d1d1f]">HalluScan</h1>
                     <div className="flex items-center gap-2 text-xs">
                         <span className={`w-2 h-2 rounded-full ${online ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></span>
                         <span className="text-gray-500 font-medium">
-                            {online ? `online · ${status.claim_detector === 'nli' ? 'NLI claim filter' : 'regex claim filter'}` : 'backend offline'}
+                            {online ? 'online · fused hallucination detector' : 'backend offline'}
                         </span>
                     </div>
                 </div>
@@ -44,6 +44,24 @@ const Navbar = ({ status, onClear, onShowGuidance, highlightEnabled, onToggleHig
                         Set
                     </button>
                 </div>
+
+                {/* Model selector — pick which model answers + is scored. Switching loads its weights, so the
+                    select is disabled while a swap is in flight (status.loading). Shown only when >1 is available. */}
+                {availableModels.length >= 2 && (
+                    <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-full pl-3 pr-2 py-1"
+                        title="Model that answers and is scored (switching loads its weights)">
+                        <Cpu size={14} className="text-gray-400" />
+                        <select
+                            value={selectedModel || ''}
+                            onChange={(e) => onSelectModel(e.target.value)}
+                            disabled={!!status.loading}
+                            className="bg-transparent text-xs text-gray-600 focus:outline-none cursor-pointer pr-1 disabled:opacity-50">
+                            {availableModels.map((m) => (
+                                <option key={m.key} value={m.key}>{m.label}</option>
+                            ))}
+                        </select>
+                    </div>
+                )}
 
                 <button onClick={onToggleHighlight}
                     className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all duration-300 border ${highlightEnabled ? 'bg-blue-50 text-blue-600 border-blue-200 hover:bg-blue-100' : 'bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100'}`}
