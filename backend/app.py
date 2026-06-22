@@ -62,7 +62,7 @@ MODELS = {
     "1b": {"label": "Llama-3.2-1B", "model_name": "meta-llama/Llama-3.2-1B-Instruct", "tag": "l1b", "hs_tag": "l1b"},
 }
 ENABLED = [k.strip() for k in os.environ.get("HALLKING_MODELS", "8b,1b").split(",") if k.strip() in MODELS]
-DEFAULT_MODEL = os.environ.get("HALLKING_DEFAULT_MODEL", "1b")   # the small model loads first (fast startup)
+DEFAULT_MODEL = os.environ.get("HALLKING_DEFAULT_MODEL", "8b")   # 8B is the demo default (the UI suggestion chips are tuned for it)
 if DEFAULT_MODEL not in ENABLED:
     DEFAULT_MODEL = ENABLED[0] if ENABLED else "1b"
 

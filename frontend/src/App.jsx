@@ -40,9 +40,10 @@ function App() {
     const saved = localStorage.getItem('highlight_enabled');
     return saved !== null ? JSON.parse(saved) : true;
   });
-  // Which model answers (registry key, e.g. "8b"/"1b"). Defaults to the backend's default_model once /status
-  // is known; persisted across reloads. Sent on every /infer.
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('halluscan_model') || '');
+  // Which model answers (registry key, e.g. "8b"/"1b"). Starts empty and adopts the backend's RESIDENT model
+  // (current_model) on the first /status — so the dropdown always reflects what's actually loaded, never a
+  // stale client-side override. The user can still switch (triggers a swap). Sent on every /infer.
+  const [selectedModel, setSelectedModel] = useState('');
 
   const setBackendUrl = (url) => {
     const clean = (url || '').trim().replace(/\/+$/, '');
@@ -82,9 +83,8 @@ function App() {
     localStorage.setItem('highlight_enabled', JSON.stringify(highlightEnabled));
   }, [highlightEnabled]);
 
-  useEffect(() => {
-    if (selectedModel) localStorage.setItem('halluscan_model', selectedModel);
-  }, [selectedModel]);
+  // NOTE: the model selection is intentionally NOT persisted — the resident model on the backend is the
+  // source of truth, so a reload re-adopts whatever is actually loaded (see selectedModel init above).
 
   const handleSendMessage = async (text) => {
     setMessages(prev => [...prev, { role: 'user', content: text, timestamp: new Date() }]);
@@ -147,18 +147,18 @@ function App() {
 
       {showGuidance && <Guidance onClose={() => setShowGuidance(false)} />}
 
-      <main className="flex-1 flex max-w-[1600px] mx-auto w-full p-6 gap-6 h-[calc(100vh-80px)]">
-        {/* Left: Chat */}
-        <div className="flex-[2] flex flex-col glass rounded-3xl overflow-hidden shadow-sm h-full max-w-[65%]">
+      <main className="flex-1 flex items-start max-w-[1600px] mx-auto w-full p-6 gap-6 min-h-[calc(100vh-80px)]">
+        {/* Left: Chat — grows with the conversation so the whole page scrolls */}
+        <div className="flex-[2] flex flex-col glass rounded-3xl shadow-sm max-w-[65%]">
           <ChatInterface messages={messages} loading={loading} onSend={handleSendMessage}
             highlightEnabled={highlightEnabled} disabled={switching} notice={switchNotice} />
         </div>
 
-        {/* Right: Risk panel */}
-        <div className="flex-1 flex flex-col gap-6 h-full min-w-[350px]">
-          <div className="glass rounded-3xl p-6 flex-1 shadow-sm">
+        {/* Right: Risk panel — pinned in view so the metrics follow as the page scrolls */}
+        <div className="flex-1 flex flex-col gap-6 min-w-[350px] sticky top-[96px] self-start">
+          <div className="glass rounded-3xl p-6 shadow-sm">
             <h2 className="text-xl font-semibold mb-4">Hallucination Risk (per turn)</h2>
-            <div className="h-full max-h-[360px]"><RiskChart data={history} /></div>
+            <div className="h-[320px]"><RiskChart data={history} /></div>
           </div>
 
           <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}

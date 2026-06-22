@@ -56,9 +56,13 @@ const Navbar = ({ status, onClear, onShowGuidance, highlightEnabled, onToggleHig
                             onChange={(e) => onSelectModel(e.target.value)}
                             disabled={!!status.loading}
                             className="bg-transparent text-xs text-gray-600 focus:outline-none cursor-pointer pr-1 disabled:opacity-50">
-                            {availableModels.map((m) => (
-                                <option key={m.key} value={m.key}>{m.label}</option>
-                            ))}
+                            {availableModels.map((m) => {
+                                // Make the resident/active model explicit so the dropdown can't disagree with
+                                // what the backend actually has loaded (current_model). · loading… = mid-swap.
+                                const tag = m.key === status.loading ? ' · loading…'
+                                    : m.key === status.current_model ? ' · loaded' : '';
+                                return <option key={m.key} value={m.key}>{m.label}{tag}</option>;
+                            })}
                         </select>
                     </div>
                 )}

@@ -2,6 +2,16 @@ import React, { useEffect, useRef } from 'react';
 import { Send, Bot, User, AlertCircle, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 
+// Demo starter questions, validated against the live detector (see tools/check_suggestions.py):
+// 2 "clean" (expected low risk) + 2 "caught" (model hallucinates -> flagged high).
+// Quick = single-fact short answer · Detailed = multi-sentence answer.
+const SUGGESTIONS = [
+    { label: 'Quick', text: 'Who painted the Mona Lisa?' },
+    { label: 'Quick', text: "Who was the lead architect of the Eiffel Tower's 1955 expansion?" },
+    { label: 'Detailed', text: 'Give me 5 facts about India' },
+    { label: 'Detailed', text: 'What is the psychological effect of eating cheese before 3 PM? Provide three short studies.' },
+];
+
 /** Lightweight inline markdown: **bold**, *italic*, `code`. */
 const renderInlineMarkdown = (text) => {
     if (!text) return text;
@@ -94,13 +104,26 @@ const ChatInterface = ({ messages, loading, onSend, highlightEnabled, disabled =
     };
 
     return (
-        <div className="flex flex-col h-full">
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div className="flex flex-col">
+            <div className="p-6 space-y-6">
                 {messages.length === 0 && (
-                    <div className="h-full flex flex-col items-center justify-center text-center opacity-30 mt-[-50px]">
-                        <Bot size={64} className="mb-4 text-[#0071e3]" />
-                        <h2 className="text-2xl font-semibold">HalluScan</h2>
-                        <p className="max-w-md mt-2">Ask a question — the answer is checked for hallucination, sentence by sentence.</p>
+                    <div className="min-h-[55vh] flex flex-col items-center justify-center text-center">
+                        <Bot size={64} className="mb-4 text-[#0071e3] opacity-30" />
+                        <h2 className="text-2xl font-semibold opacity-30">HalluScan</h2>
+                        <p className="max-w-md mt-2 opacity-30">Ask a question — the answer is checked for hallucination, sentence by sentence.</p>
+                        <div className="mt-8 w-full max-w-xl">
+                            <div className="text-xs font-medium uppercase tracking-wider text-gray-400 mb-3">Try one of these</div>
+                            <div className="flex flex-wrap justify-center gap-2">
+                                {SUGGESTIONS.map((s) => (
+                                    <button key={s.text} type="button" disabled={loading || disabled}
+                                        onClick={() => onSend(s.text)}
+                                        className="group flex items-center gap-2 rounded-full border border-gray-200 bg-white/60 hover:bg-blue-50 hover:border-blue-200 text-sm text-gray-700 px-4 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                                        <span className="text-[10px] font-semibold uppercase tracking-wide text-[#0071e3] bg-blue-50 group-hover:bg-white rounded-full px-1.5 py-0.5">{s.label}</span>
+                                        <span className="text-left">{s.text}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
                     </div>
                 )}
 
@@ -110,12 +133,12 @@ const ChatInterface = ({ messages, loading, onSend, highlightEnabled, disabled =
                     return (
                     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} key={idx}
                         className={`flex gap-4 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
-                        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${msg.role === 'user' ? 'bg-[#1d1d1f] text-white' : 'bg-[#0071e3] text-white'}`}>
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${msg.role === 'user' ? 'bg-[#d6e9ff] text-[#0071e3]' : 'bg-[#0071e3] text-white'}`}>
                             {msg.role === 'user' ? <User size={16} /> : <Bot size={16} />}
                         </div>
 
                         <div className={`flex flex-col max-w-[80%] ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
-                            <div className={`rounded-2xl px-5 py-3 shadow-sm ${msg.role === 'user' ? 'bg-[#1d1d1f] text-white rounded-tr-none' : 'bg-white rounded-tl-none border border-gray-100'}`}>
+                            <div className={`rounded-2xl px-5 py-3 shadow-sm ${msg.role === 'user' ? 'bg-[#e8f1fe] text-[#1d1d1f] rounded-tr-none' : 'bg-white rounded-tl-none border border-gray-100'}`}>
                                 {highlightEnabled && msg.sentences && msg.sentences.length > 0 ? (
                                     <div className="leading-relaxed">
                                         {msg.sentences.map((sent, sIdx) => {
@@ -177,10 +200,24 @@ const ChatInterface = ({ messages, loading, onSend, highlightEnabled, disabled =
                 <div ref={endRef} />
             </div>
 
-            <div className="p-4 bg-white/50 border-t border-gray-100 backdrop-blur-sm">
+            <div className="sticky bottom-0 p-4 bg-white/50 border-t border-gray-100 backdrop-blur-sm">
                 {notice && (
                     <div className="text-xs text-amber-600 mb-2 flex items-center gap-1.5">
                         <Loader2 className="animate-spin" size={12} /> {notice}
+                    </div>
+                )}
+                {/* Compact suggestions, always reachable above the box once the chat has started (hidden while typing) */}
+                {messages.length > 0 && input.trim() === '' && (
+                    <div className="flex flex-wrap gap-2 mb-2">
+                        {SUGGESTIONS.map((s) => (
+                            <button key={s.text} type="button" disabled={loading || disabled}
+                                onClick={() => onSend(s.text)}
+                                className="flex items-center gap-1.5 rounded-full border border-gray-200 bg-white/70 hover:bg-blue-50 hover:border-blue-200 text-xs text-gray-600 px-3 py-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                title={s.text}>
+                                <span className="text-[9px] font-semibold uppercase tracking-wide text-[#0071e3]">{s.label}</span>
+                                <span className="max-w-[220px] truncate">{s.text}</span>
+                            </button>
+                        ))}
                     </div>
                 )}
                 <form onSubmit={handleSubmit} className="relative flex items-center">
